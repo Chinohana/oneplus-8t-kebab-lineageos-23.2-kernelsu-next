@@ -68,10 +68,14 @@ for required in CONFIG_KSU=y CONFIG_KSU_KPROBES_HOOK=y CONFIG_KPROBES=y CONFIG_O
 done
 
 echo "Preparing KernelSU-Next's Linux 4.19 compatibility backport"
-# KernelSU-Next v1.1.1 adds path_umount from its Kbuild Makefile. Build one
-# KernelSU object serially first so that source patch is applied before the
-# parallel build can compile fs/namespace.o.
-make -j1 "${make_args[@]}" drivers/kernelsu/core_hook.o
+# KernelSU-Next v1.1.1 adds path_umount while parsing its Kbuild Makefile.
+# Parse that Makefile without compiling an object so the source patch lands
+# before the parallel build can race ahead and compile fs/namespace.o.
+make --dry-run "${make_args[@]}" drivers/kernelsu/core_hook.o >/dev/null
+grep -q '^int path_umount(struct path \*path, int flags)' \
+  "${KERNEL_DIR}/fs/namespace.c"
+grep -q '^int path_umount(struct path \*path, int flags);' \
+  "${KERNEL_DIR}/fs/internal.h"
 
 echo "Building Image"
 make -j"$(nproc)" "${make_args[@]}" Image
