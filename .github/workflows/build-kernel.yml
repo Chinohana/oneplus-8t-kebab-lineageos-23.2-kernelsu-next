@@ -1,0 +1,82 @@
+name: Build kebab kernel with KernelSU-Next
+
+on:
+  workflow_dispatch:
+    inputs:
+      kernel_ref:
+        description: LineageOS kernel branch, tag, or commit
+        required: true
+        default: lineage-23.2
+        type: string
+      kernelsu_ref:
+        description: KernelSU-Next tag or commit (v1.1.1 supports Linux 4.19)
+        required: true
+        default: v1.1.1
+        type: string
+  push:
+    branches:
+      - main
+    paths:
+      - .github/workflows/build-kernel.yml
+      - configs/**
+      - packaging/**
+      - scripts/**
+
+permissions:
+  contents: read
+
+concurrency:
+  group: kebab-kernel-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: LineageOS 23.2 / kebab / KernelSU-Next
+    runs-on: ubuntu-22.04
+    timeout-minutes: 120
+    env:
+      KERNEL_REF: ${{ inputs.kernel_ref || 'lineage-23.2' }}
+      KSU_REF: ${{ inputs.kernelsu_ref || 'v1.1.1' }}
+      CLANG_VERSION: clang-r563880c
+
+    steps:
+      - name: Check out build configuration
+        uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y \
+            bc bison build-essential ca-certificates curl device-tree-compiler \
+            flex git libelf-dev libssl-dev lz4 python3 rsync unzip zip zstd
+
+      - name: Fetch LineageOS kernel source
+        run: |
+          git init kernel
+          git -C kernel remote add origin \
+            https://github.com/LineageOS/android_kernel_oneplus_sm8250.git
+          git -C kernel fetch --depth=1 origin "${KERNEL_REF}"
+          git -C kernel checkout --detach FETCH_HEAD
+
+      - name: Fetch the LineageOS 23.2 Clang toolchain
+        run: |
+          mkdir -p toolchain
+          curl --fail --location --retry 3 --show-error \
+            "https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/main/${CLANG_VERSION}.tar.gz" \
+            | tar -xz -C toolchain
+          toolchain/bin/clang --version
+
+      - name: Build kernel
+        run: bash scripts/build-kernel.sh
+
+      - name: Package AnyKernel3 ZIP
+        run: bash scripts/package-anykernel.sh
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: kebab-lineage-23.2-kernelsu-next-${{ env.KERNEL_SHA }}
+          path: dist/
+          if-no-files-found: error
+          compression-level: 6
+          retention-days: 14
