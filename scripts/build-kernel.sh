@@ -8,7 +8,7 @@ DIST_DIR="${ROOT_DIR}/dist"
 TOOLCHAIN_DIR="${TOOLCHAIN_DIR:-${ROOT_DIR}/toolchain}"
 
 : "${KERNEL_REF:=lineage-23.2}"
-: "${KSU_REF:=v1.1.1}"
+: "${SUKISU_REF:=v4.1.3}"
 : "${CLANG_VERSION:=clang-r563880c}"
 
 export PATH="${TOOLCHAIN_DIR}/bin:${PATH}"
@@ -20,13 +20,19 @@ export KBUILD_BUILD_HOST=github
 
 mkdir -p "${OUT_DIR}" "${DIST_DIR}"
 
-echo "Integrating KernelSU-Next ${KSU_REF}"
+echo "Integrating SukiSU-Ultra ${SUKISU_REF}"
 (
   cd "${KERNEL_DIR}"
   curl --fail --location --silent --show-error \
-    "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/${KSU_REF}/kernel/setup.sh" \
-    | sh -s "${KSU_REF}"
+    "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/${SUKISU_REF}/kernel/setup.sh" \
+    | sh -s "${SUKISU_REF}"
 )
+
+echo "Backporting path_umount for Linux 4.19"
+if ! grep -q '^int path_umount(struct path \*path, int flags)' \
+  "${KERNEL_DIR}/fs/namespace.c"; then
+  git -C "${KERNEL_DIR}" apply "${ROOT_DIR}/patches/path-umount-4.19.patch"
+fi
 
 make_args=(
   -C "${KERNEL_DIR}"
@@ -57,25 +63,25 @@ make "${make_args[@]}" olddefconfig
 make "${make_args[@]}" olddefconfig
 "${KERNEL_DIR}/scripts/kconfig/merge_config.sh" -m -O "${OUT_DIR}" \
   "${OUT_DIR}/.config" \
-  "${ROOT_DIR}/configs/kernelsu-next.config"
+  "${ROOT_DIR}/configs/sukisu-ultra.config"
 make "${make_args[@]}" olddefconfig
 
-for required in CONFIG_KSU=y CONFIG_KSU_KPROBES_HOOK=y CONFIG_KPROBES=y CONFIG_OVERLAY_FS=y; do
+for required in \
+  CONFIG_KSU=y \
+  CONFIG_KSU_MANUAL_SU=y \
+  CONFIG_KPM=y \
+  CONFIG_KPROBES=y \
+  CONFIG_KRETPROBES=y \
+  CONFIG_HAVE_SYSCALL_TRACEPOINTS=y \
+  CONFIG_KALLSYMS=y \
+  CONFIG_KALLSYMS_ALL=y \
+  CONFIG_EXT4_FS=y \
+  CONFIG_OVERLAY_FS=y; do
   grep -qx "${required}" "${OUT_DIR}/.config" || {
     echo "Required setting is missing after olddefconfig: ${required}" >&2
     exit 1
   }
 done
-
-echo "Preparing KernelSU-Next's Linux 4.19 compatibility backport"
-# KernelSU-Next v1.1.1 adds path_umount while parsing its Kbuild Makefile.
-# Parse that Makefile without compiling an object so the source patch lands
-# before the parallel build can race ahead and compile fs/namespace.o.
-make --dry-run "${make_args[@]}" drivers/kernelsu/core_hook.o >/dev/null
-grep -q '^int path_umount(struct path \*path, int flags)' \
-  "${KERNEL_DIR}/fs/namespace.c"
-grep -q '^int path_umount(struct path \*path, int flags);' \
-  "${KERNEL_DIR}/fs/internal.h"
 
 echo "Building Image"
 make -j"$(nproc)" "${make_args[@]}" Image
@@ -86,7 +92,7 @@ cp "${image_path}" "${DIST_DIR}/Image"
 cp "${OUT_DIR}/.config" "${DIST_DIR}/kernel.config"
 
 kernel_sha="$(git -C "${KERNEL_DIR}" rev-parse HEAD)"
-ksu_sha="$(git -C "${KERNEL_DIR}/KernelSU-Next" rev-parse HEAD)"
+sukisu_sha="$(git -C "${KERNEL_DIR}/KernelSU" rev-parse HEAD)"
 kernel_release="$(make -s "${make_args[@]}" kernelrelease)"
 
 cat > "${DIST_DIR}/build-info.txt" <<EOF
@@ -96,13 +102,13 @@ kernel_repository=https://github.com/LineageOS/android_kernel_oneplus_sm8250
 kernel_ref=${KERNEL_REF}
 kernel_commit=${kernel_sha}
 kernel_release=${kernel_release}
-kernelsu_repository=https://github.com/KernelSU-Next/KernelSU-Next
-kernelsu_ref=${KSU_REF}
-kernelsu_commit=${ksu_sha}
+sukisu_repository=https://github.com/SukiSU-Ultra/SukiSU-Ultra
+sukisu_ref=${SUKISU_REF}
+sukisu_commit=${sukisu_sha}
 clang_version=${CLANG_VERSION}
 compiler=$(clang --version | head -n 1)
 EOF
 
 echo "KERNEL_SHA=${kernel_sha}" >> "${GITHUB_ENV}"
-echo "KSU_SHA=${ksu_sha}" >> "${GITHUB_ENV}"
+echo "SUKISU_SHA=${sukisu_sha}" >> "${GITHUB_ENV}"
 echo "KERNEL_RELEASE=${kernel_release}" >> "${GITHUB_ENV}"
