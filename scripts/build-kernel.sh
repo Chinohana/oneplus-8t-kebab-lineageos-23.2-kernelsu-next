@@ -34,6 +34,13 @@ if ! grep -q '^int path_umount(struct path \*path, int flags)' \
   git -C "${KERNEL_DIR}" apply "${ROOT_DIR}/patches/path-umount-4.19.patch"
 fi
 
+echo "Applying the Linux 4.19 access_ok compatibility shim for SukiSU-Ultra KPM"
+if ! grep -q '^static inline bool sukisu_access_ok_compat' \
+  "${KERNEL_DIR}/KernelSU/kernel/kpm/kpm.c"; then
+  git -C "${KERNEL_DIR}/KernelSU" apply \
+    "${ROOT_DIR}/patches/sukisu-kpm-access-ok-4.19.patch"
+fi
+
 make_args=(
   -C "${KERNEL_DIR}"
   O="${OUT_DIR}"
