@@ -62,6 +62,13 @@ if ! grep -q '^#define SECCOMP_ARCH_NATIVE_NR __NR_syscalls' \
     "${ROOT_DIR}/patches/sukisu-seccomp-nr-4.19.patch"
 fi
 
+echo "Using the Linux 4.19 mount header layout for SukiSU-Ultra"
+if grep -q '^#include <uapi/linux/mount.h>' \
+  "${KERNEL_DIR}/KernelSU/kernel/infra/su_mount_ns.c"; then
+  git -C "${KERNEL_DIR}/KernelSU" apply \
+    "${ROOT_DIR}/patches/sukisu-mount-header-4.19.patch"
+fi
+
 make_args=(
   -C "${KERNEL_DIR}"
   O="${OUT_DIR}"
