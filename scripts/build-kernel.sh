@@ -55,6 +55,13 @@ if ! grep -q '^#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 0, 0)$' \
     "${ROOT_DIR}/patches/sukisu-file-wrapper-4.19.patch"
 fi
 
+echo "Backporting the native seccomp syscall count for Linux 4.19"
+if ! grep -q '^#define SECCOMP_ARCH_NATIVE_NR __NR_syscalls' \
+  "${KERNEL_DIR}/KernelSU/kernel/infra/seccomp_cache.c"; then
+  git -C "${KERNEL_DIR}/KernelSU" apply \
+    "${ROOT_DIR}/patches/sukisu-seccomp-nr-4.19.patch"
+fi
+
 make_args=(
   -C "${KERNEL_DIR}"
   O="${OUT_DIR}"
