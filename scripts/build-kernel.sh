@@ -76,6 +76,13 @@ if ! grep -q '^static int ksu_handle_event(struct fsnotify_group' \
     "${ROOT_DIR}/patches/sukisu-fsnotify-4.19.patch"
 fi
 
+echo "Backporting the Linux 4.19 task_work API for SukiSU-Ultra"
+if ! grep -q '^#define KSU_TWA_RESUME true' \
+  "${KERNEL_DIR}/KernelSU/kernel/policy/allowlist.c"; then
+  git -C "${KERNEL_DIR}/KernelSU" apply \
+    "${ROOT_DIR}/patches/sukisu-task-work-4.19.patch"
+fi
+
 make_args=(
   -C "${KERNEL_DIR}"
   O="${OUT_DIR}"
