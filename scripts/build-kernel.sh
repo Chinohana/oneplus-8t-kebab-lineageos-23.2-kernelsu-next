@@ -97,6 +97,10 @@ if ! grep -q '^static DEFINE_MUTEX(ksu_rules);' \
     "${ROOT_DIR}/patches/sukisu-selinux-policy-4.19.patch"
 fi
 
+echo "Using the Linux 4.19 SELinux policydb implementation"
+cp "${ROOT_DIR}/compat/sukisu/sepolicy-4.19.c" \
+  "${KERNEL_DIR}/KernelSU/kernel/selinux/sepolicy.c"
+
 make_args=(
   -C "${KERNEL_DIR}"
   O="${OUT_DIR}"
