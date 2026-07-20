@@ -53,10 +53,10 @@ diff --git a/kernel/selinux/rules.c b/kernel/selinux/rules.c
      ksu_destroy_sepolicy(old_pol);
 +#endif
  
-     reset_avc_cache();
- out_unlock:
+    reset_avc_cache();
 +#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 10, 0)
-     mutex_unlock(&selinux_state.policy_mutex);
+ out_unlock:
+    mutex_unlock(&selinux_state.policy_mutex);
 +#else
 +    mutex_unlock(&ksu_rules);
 +#endif
