@@ -90,6 +90,13 @@ if ! grep -q '^#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 0, 0)$' \
     "${ROOT_DIR}/patches/sukisu-seccomp-filter-count-4.19.patch"
 fi
 
+echo "Backporting the Linux 4.19 SELinux policy layout for SukiSU-Ultra"
+if ! grep -q '^static DEFINE_MUTEX(ksu_rules);' \
+  "${KERNEL_DIR}/KernelSU/kernel/selinux/rules.c"; then
+  git -C "${KERNEL_DIR}/KernelSU" apply \
+    "${ROOT_DIR}/patches/sukisu-selinux-policy-4.19.patch"
+fi
+
 make_args=(
   -C "${KERNEL_DIR}"
   O="${OUT_DIR}"
