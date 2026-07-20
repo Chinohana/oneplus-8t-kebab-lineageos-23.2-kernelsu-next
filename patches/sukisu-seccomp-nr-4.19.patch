@@ -2,7 +2,7 @@ diff --git a/kernel/infra/seccomp_cache.c b/kernel/infra/seccomp_cache.c
 index a9d2b634..00000000 100644
 --- a/kernel/infra/seccomp_cache.c
 +++ b/kernel/infra/seccomp_cache.c
-@@ -5,7 +5,13 @@
+@@ -5,6 +5,12 @@
  #include <linux/uaccess.h>
  #include <linux/filter.h>
  #include <linux/seccomp.h>
