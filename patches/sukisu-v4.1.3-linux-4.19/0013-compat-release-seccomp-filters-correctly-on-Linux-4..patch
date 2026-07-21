@@ -1,0 +1,45 @@
+From 9f27ff3f9ef7222daf2ca8c0f28ea6ec7b5aacbb Mon Sep 17 00:00:00 2001
+From: Chinohana <chinohana@outlook.com>
+Date: Wed, 22 Jul 2026 04:38:54 +0800
+Subject: [PATCH] compat: release seccomp filters correctly on Linux 4.19
+
+The locked 4.19 headers expose put_seccomp_filter(task), while kernels from 5.9 use seccomp_filter_release(task). Route the fake task through the version-appropriate release helper and retain the existing filter_count layout guard.
+---
+ kernel/policy/app_profile.c | 13 ++++++++++++-
+ 1 file changed, 12 insertions(+), 1 deletion(-)
+
+diff --git a/kernel/policy/app_profile.c b/kernel/policy/app_profile.c
+index 29987a97..95537adb 100644
+--- a/kernel/policy/app_profile.c
++++ b/kernel/policy/app_profile.c
+@@ -63,7 +63,18 @@ void setup_groups(struct root_profile *profile, struct cred *cred)
+     put_group_info(group_info);
+ }
+ 
++#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 9, 0)
+ void seccomp_filter_release(struct task_struct *tsk);
++#endif
++
++static void ksu_release_seccomp_filter(struct task_struct *task)
++{
++#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 9, 0)
++    seccomp_filter_release(task);
++#else
++    put_seccomp_filter(task);
++#endif
++}
+ 
+ static void disable_seccomp(void)
+ {
+@@ -102,7 +113,7 @@ static void disable_seccomp(void)
+     fake->sighand = NULL;
+ #endif
+ 
+-    seccomp_filter_release(fake);
++    ksu_release_seccomp_filter(fake);
+     kfree(fake);
+ }
+ 
+-- 
+2.53.0.windows.2
+

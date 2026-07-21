@@ -10,3 +10,4 @@
 0010-compat-use-native-Linux-4.19-nofault-and-arm64-helpe.patch
 0011-compat-include-Linux-4.19-task-and-pid-declarations.patch
 0012-compat-centralize-Linux-4.19-task_work-semantics.patch
+0013-compat-release-seccomp-filters-correctly-on-Linux-4..patch
