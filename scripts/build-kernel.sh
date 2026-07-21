@@ -68,6 +68,24 @@ apply_patch_series "${SUKISU_DIR}" \
 git -C "${KERNEL_DIR}" diff --check
 git -C "${SUKISU_DIR}" diff --check
 
+emit_patch_digests() {
+  local series_dir="$1"
+  local patch_name
+
+  sha256sum "${series_dir}/series" | cut -d ' ' -f1
+  while IFS= read -r patch_name || [[ -n "${patch_name}" ]]; do
+    [[ -z "${patch_name}" || "${patch_name}" == \#* ]] && continue
+    sha256sum "${series_dir}/${patch_name}" | cut -d ' ' -f1
+  done < "${series_dir}/series"
+}
+
+patch_series_hash="$(
+  {
+    emit_patch_digests "${ROOT_DIR}/patches/kernel-lineage-23.2"
+    emit_patch_digests "${ROOT_DIR}/patches/sukisu-v4.1.3-linux-4.19"
+  } | sha256sum | cut -d ' ' -f1
+)"
+
 make_args=(
   -C "${KERNEL_DIR}"
   O="${OUT_DIR}"
@@ -103,7 +121,6 @@ make "${make_args[@]}" olddefconfig
 for required in \
   CONFIG_KSU=y \
   CONFIG_KSU_MANUAL_SU=y \
-  CONFIG_KPM=y \
   CONFIG_KPROBES=y \
   CONFIG_KRETPROBES=y \
   CONFIG_HAVE_SYSCALL_TRACEPOINTS=y \
@@ -117,6 +134,11 @@ for required in \
   }
 done
 
+grep -qx '# CONFIG_KPM is not set' "${OUT_DIR}/.config" || {
+  echo "Stable configuration unexpectedly enabled KPM" >&2
+  exit 1
+}
+
 echo "Building Image"
 make -j"$(nproc)" "${make_args[@]}" Image
 
@@ -127,11 +149,14 @@ cp "${OUT_DIR}/.config" "${DIST_DIR}/kernel.config"
 
 kernel_sha="$(git -C "${KERNEL_DIR}" rev-parse HEAD)"
 sukisu_sha="$(git -C "${SUKISU_DIR}" rev-parse HEAD)"
+project_sha="$(git -C "${ROOT_DIR}" rev-parse HEAD)"
 kernel_release="$(make -s "${make_args[@]}" kernelrelease)"
+config_hash="$(sha256sum "${OUT_DIR}/.config" | cut -d ' ' -f1)"
 
 cat > "${DIST_DIR}/build-info.txt" <<EOF
 device=kebab
 rom=lineage-23.2
+project_commit=${project_sha}
 kernel_repository=https://github.com/LineageOS/android_kernel_oneplus_sm8250
 kernel_ref=${KERNEL_COMMIT}
 kernel_commit=${kernel_sha}
@@ -141,6 +166,8 @@ sukisu_ref=${SUKISU_COMMIT}
 sukisu_commit=${sukisu_sha}
 anykernel3_commit=${ANYKERNEL3_COMMIT}
 toolchain_commit=${TOOLCHAIN_COMMIT}
+patch_series_hash=${patch_series_hash}
+config_hash=${config_hash}
 clang_version=${CLANG_VERSION}
 compiler=$(clang --version | head -n 1)
 EOF
