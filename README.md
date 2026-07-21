@@ -10,10 +10,10 @@ This repository builds the official LineageOS 23.2 kernel for the OnePlus 8T (`k
 - Kernel: Linux 4.19
 - SukiSU-Ultra: `v4.1.3` by default
 - Integration: built-in, non-GKI
-- KPM: enabled
+- KPM: disabled in the stable configuration
 - SUSFS: not included
 
-SukiSU-Ultra officially supports manually built legacy kernels from Linux 4.4 onward. This project pins the latest stable release while keeping the SukiSU ref selectable from the workflow dispatch form.
+SukiSU-Ultra officially supports manually built legacy kernels from Linux 4.4 onward. This project pins SukiSU-Ultra v4.1.3 and every other upstream input to a full commit SHA in `build.lock`.
 
 Linux 4.19 does not provide `path_umount`, which current SukiSU-Ultra uses for per-app mount namespace cleanup. The workflow applies a small backport before compilation and records all resolved source commits in the artifact.
 
