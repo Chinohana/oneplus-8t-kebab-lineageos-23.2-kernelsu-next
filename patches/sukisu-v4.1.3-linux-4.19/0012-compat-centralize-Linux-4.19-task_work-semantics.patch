@@ -1,0 +1,96 @@
+From d68ca25f9f0354cd2917e750ec712534e6ce4d10 Mon Sep 17 00:00:00 2001
+From: Chinohana <chinohana@outlook.com>
+Date: Wed, 22 Jul 2026 04:35:00 +0800
+Subject: [PATCH] compat: centralize Linux 4.19 task_work semantics
+
+The locked Linux 4.19 task_work_add declaration takes bool notify. Define one local KSU_TASK_WORK_RESUME compatibility name and use it from both allowlist and supercall instead of duplicating version macros.
+---
+ kernel/compat/task_work_compat.h | 13 +++++++++++++
+ kernel/policy/allowlist.c        |  9 ++-------
+ kernel/supercall/supercall.c     |  3 ++-
+ 3 files changed, 17 insertions(+), 8 deletions(-)
+ create mode 100644 kernel/compat/task_work_compat.h
+
+diff --git a/kernel/compat/task_work_compat.h b/kernel/compat/task_work_compat.h
+new file mode 100644
+index 00000000..bba8279d
+--- /dev/null
++++ b/kernel/compat/task_work_compat.h
+@@ -0,0 +1,13 @@
++#ifndef __KSU_COMPAT_TASK_WORK_COMPAT_H
++#define __KSU_COMPAT_TASK_WORK_COMPAT_H
++
++#include <linux/task_work.h>
++#include <linux/version.h>
++
++#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 0, 0)
++#define KSU_TASK_WORK_RESUME true
++#else
++#define KSU_TASK_WORK_RESUME TWA_RESUME
++#endif
++
++#endif
+diff --git a/kernel/policy/allowlist.c b/kernel/policy/allowlist.c
+index 94cfb775..390220c9 100644
+--- a/kernel/policy/allowlist.c
++++ b/kernel/policy/allowlist.c
+@@ -3,7 +3,6 @@
+ #include <linux/rculist.h>
+ #include <linux/mutex.h>
+ #include <linux/task_work.h>
+-#include <linux/sched/task.h>
+ #include <linux/capability.h>
+ #include <linux/compiler.h>
+ #include <linux/fs.h>
+@@ -15,17 +14,13 @@
+ #include <linux/types.h>
+ #include <linux/version.h>
+ 
+-#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 0, 0)
+-#define KSU_TWA_RESUME true
+-#else
+-#define KSU_TWA_RESUME TWA_RESUME
+-#endif
+ #include <linux/compiler_types.h>
+ #include <linux/hashtable.h>
+ #include <linux/kref.h>
+ 
+ #include "klog.h" // IWYU pragma: keep
+ #include "ksu.h"
++#include "compat/task_work_compat.h"
+ #include "runtime/ksud_boot.h"
+ #include "selinux/selinux.h"
+ #include "policy/allowlist.h"
+@@ -492,7 +487,7 @@ void ksu_persistent_allow_list()
+         goto put_task;
+     }
+     cb->func = do_persistent_allow_list;
+-    if (task_work_add(tsk, cb, KSU_TWA_RESUME)) {
++    if (task_work_add(tsk, cb, KSU_TASK_WORK_RESUME)) {
+         kfree(cb);
+         pr_warn("save_allow_list add task_work failed\n");
+     }
+diff --git a/kernel/supercall/supercall.c b/kernel/supercall/supercall.c
+index 4c9361b4..f7d75c30 100644
+--- a/kernel/supercall/supercall.c
++++ b/kernel/supercall/supercall.c
+@@ -12,6 +12,7 @@
+ #include <linux/version.h>
+ 
+ #include "uapi/supercall.h"
++#include "compat/task_work_compat.h"
+ #include "kpm/kpm.h"
+ #include "supercall/internal.h"
+ #include "arch.h"
+@@ -98,7 +99,7 @@ static int reboot_handler_pre(struct kprobe *p, struct pt_regs *regs)
+         tw->outp = (int __user *)arg4;
+         tw->cb.func = ksu_install_fd_tw_func;
+ 
+-        if (task_work_add(current, &tw->cb, TWA_RESUME)) {
++        if (task_work_add(current, &tw->cb, KSU_TASK_WORK_RESUME)) {
+             kfree(tw);
+             pr_warn("install fd add task_work failed\n");
+         }
+-- 
+2.53.0.windows.2
+
