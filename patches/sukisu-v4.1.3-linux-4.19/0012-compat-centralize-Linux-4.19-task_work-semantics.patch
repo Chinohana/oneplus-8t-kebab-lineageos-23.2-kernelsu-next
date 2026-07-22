@@ -1,14 +1,14 @@
-From d68ca25f9f0354cd2917e750ec712534e6ce4d10 Mon Sep 17 00:00:00 2001
+From 0a05f221e0ba47cd071c3089853c3d5999ba4e28 Mon Sep 17 00:00:00 2001
 From: Chinohana <chinohana@outlook.com>
-Date: Wed, 22 Jul 2026 04:35:00 +0800
+Date: Wed, 22 Jul 2026 14:17:57 +0800
 Subject: [PATCH] compat: centralize Linux 4.19 task_work semantics
 
-The locked Linux 4.19 task_work_add declaration takes bool notify. Define one local KSU_TASK_WORK_RESUME compatibility name and use it from both allowlist and supercall instead of duplicating version macros.
+Linux 4.19 task_work_add takes a bool notify argument, so share one version-aware KSU_TASK_WORK_RESUME macro between allowlist and supercall. Keep linux/sched/task.h in allowlist.c because that file also owns the put_task_struct lifetime operation declared by the locked 4.19 kernel.
 ---
  kernel/compat/task_work_compat.h | 13 +++++++++++++
- kernel/policy/allowlist.c        |  9 ++-------
+ kernel/policy/allowlist.c        |  8 ++------
  kernel/supercall/supercall.c     |  3 ++-
- 3 files changed, 17 insertions(+), 8 deletions(-)
+ 3 files changed, 17 insertions(+), 7 deletions(-)
  create mode 100644 kernel/compat/task_work_compat.h
 
 diff --git a/kernel/compat/task_work_compat.h b/kernel/compat/task_work_compat.h
@@ -31,18 +31,10 @@ index 00000000..bba8279d
 +
 +#endif
 diff --git a/kernel/policy/allowlist.c b/kernel/policy/allowlist.c
-index 94cfb775..390220c9 100644
+index 94cfb775..eabb25f9 100644
 --- a/kernel/policy/allowlist.c
 +++ b/kernel/policy/allowlist.c
-@@ -3,7 +3,6 @@
- #include <linux/rculist.h>
- #include <linux/mutex.h>
- #include <linux/task_work.h>
--#include <linux/sched/task.h>
- #include <linux/capability.h>
- #include <linux/compiler.h>
- #include <linux/fs.h>
-@@ -15,17 +14,13 @@
+@@ -15,17 +15,13 @@
  #include <linux/types.h>
  #include <linux/version.h>
  
@@ -61,7 +53,7 @@ index 94cfb775..390220c9 100644
  #include "runtime/ksud_boot.h"
  #include "selinux/selinux.h"
  #include "policy/allowlist.h"
-@@ -492,7 +487,7 @@ void ksu_persistent_allow_list()
+@@ -492,7 +488,7 @@ void ksu_persistent_allow_list()
          goto put_task;
      }
      cb->func = do_persistent_allow_list;
