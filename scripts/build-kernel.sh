@@ -65,6 +65,7 @@ apply_patch_series "${KERNEL_DIR}" \
   "${ROOT_DIR}/patches/kernel-lineage-23.2"
 apply_patch_series "${SUKISU_DIR}" \
   "${ROOT_DIR}/patches/sukisu-v4.1.3-linux-4.19"
+git -C "${SUKISU_DIR}" add -N -- kernel/compat/task_work_compat.h
 git -C "${KERNEL_DIR}" diff --check
 git -C "${SUKISU_DIR}" diff --check
 git -C "${KERNEL_DIR}" diff --binary > "${DIST_DIR}/kernel-final.diff"
