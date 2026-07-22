@@ -11,6 +11,7 @@ on:
       - configs/**
       - patches/**
       - scripts/build-kernel.sh
+      - scripts/generate-root-readiness.sh
 
 permissions:
   contents: read
@@ -40,7 +41,7 @@ jobs:
           set -a
           source build.lock
           set +a
-          for name in KERNEL_COMMIT SUKISU_COMMIT ANYKERNEL3_COMMIT TOOLCHAIN_COMMIT; do
+          for name in KERNEL_COMMIT SUKISU_COMMIT TOOLCHAIN_COMMIT; do
             value="${!name}"
             [[ "${value}" =~ ^[0-9a-f]{40}$ ]] || {
               echo "Invalid ${name}: ${value}" >&2
@@ -96,6 +97,7 @@ jobs:
           test -s dist/kernel-final.diff
           test -s dist/sukisu-final-complete.diff
           test -s dist/applied-patches.txt
+          test -s dist/root-readiness.txt
           test -s dist/build.log
           cd dist
           sha256sum \
@@ -105,6 +107,7 @@ jobs:
             kernel-final.diff \
             sukisu-final-complete.diff \
             applied-patches.txt \
+            root-readiness.txt \
             build.log > SHA256SUMS
 
       - name: Upload Image build audit
@@ -120,6 +123,7 @@ jobs:
             dist/kernel-final.diff
             dist/sukisu-final-complete.diff
             dist/applied-patches.txt
+            dist/root-readiness.txt
             dist/build.log
           if-no-files-found: warn
           compression-level: 6

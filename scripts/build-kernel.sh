@@ -13,7 +13,7 @@ SUKISU_DIR="${KERNEL_DIR}/SukiSU-Ultra"
 # shellcheck disable=SC1091
 source "${ROOT_DIR}/build.lock"
 
-for lock_var in KERNEL_COMMIT SUKISU_COMMIT ANYKERNEL3_COMMIT TOOLCHAIN_COMMIT; do
+for lock_var in KERNEL_COMMIT SUKISU_COMMIT TOOLCHAIN_COMMIT; do
   lock_value="${!lock_var}"
   [[ "${lock_value}" =~ ^[0-9a-f]{40}$ ]] || {
     echo "Invalid ${lock_var}: ${lock_value}" >&2
@@ -27,6 +27,12 @@ export LLVM=1
 export LLVM_IAS=1
 export KBUILD_BUILD_USER=github-actions
 export KBUILD_BUILD_HOST=github
+export SOURCE_DATE_EPOCH="${SOURCE_DATE_EPOCH:-0}"
+export KBUILD_BUILD_TIMESTAMP="${KBUILD_BUILD_TIMESTAMP:-Thu Jan 1 00:00:00 UTC 1970}"
+export KBUILD_BUILD_VERSION="${KBUILD_BUILD_VERSION:-1}"
+export LC_ALL=C
+export LANG=C
+export TZ=UTC
 
 mkdir -p "${OUT_DIR}" "${DIST_DIR}"
 
@@ -149,7 +155,8 @@ for required in \
   CONFIG_KALLSYMS=y \
   CONFIG_KALLSYMS_ALL=y \
   CONFIG_EXT4_FS=y \
-  CONFIG_OVERLAY_FS=y; do
+  CONFIG_OVERLAY_FS=y \
+  CONFIG_SECURITY_SELINUX=y; do
   grep -qx "${required}" "${OUT_DIR}/.config" || {
     echo "Required setting is missing after olddefconfig: ${required}" >&2
     exit 1
@@ -175,6 +182,12 @@ project_sha="$(git -C "${ROOT_DIR}" rev-parse HEAD)"
 kernel_release="$(make -s "${make_args[@]}" kernelrelease)"
 config_hash="$(sha256sum "${OUT_DIR}/.config" | cut -d ' ' -f1)"
 
+bash "${ROOT_DIR}/scripts/generate-root-readiness.sh" \
+  "${DIST_DIR}/kernel.config" \
+  "${DIST_DIR}/applied-patches.txt" \
+  "${kernel_release}" \
+  "${DIST_DIR}/root-readiness.txt"
+
 cat > "${DIST_DIR}/build-info.txt" <<EOF
 device=kebab
 rom=lineage-23.2
@@ -186,12 +199,16 @@ kernel_release=${kernel_release}
 sukisu_repository=https://github.com/SukiSU-Ultra/SukiSU-Ultra
 sukisu_ref=${SUKISU_COMMIT}
 sukisu_commit=${sukisu_sha}
-anykernel3_commit=${ANYKERNEL3_COMMIT}
 toolchain_commit=${TOOLCHAIN_COMMIT}
 patch_series_hash=${patch_series_hash}
 config_hash=${config_hash}
 clang_version=${CLANG_VERSION}
 compiler=$(clang --version | head -n 1)
+source_date_epoch=${SOURCE_DATE_EPOCH}
+kbuild_build_timestamp=${KBUILD_BUILD_TIMESTAMP}
+kbuild_build_version=${KBUILD_BUILD_VERSION}
+locale=${LC_ALL}
+timezone=${TZ}
 EOF
 
 echo "KERNEL_SHA=${kernel_sha}" >> "${GITHUB_ENV}"
