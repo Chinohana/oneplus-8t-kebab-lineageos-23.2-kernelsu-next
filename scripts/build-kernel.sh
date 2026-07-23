@@ -6,10 +6,20 @@ KERNEL_DIR="${KERNEL_DIR:-${ROOT_DIR}/kernel}"
 OUT_DIR="${OUT_DIR:-${ROOT_DIR}/out}"
 DIST_DIR="${ROOT_DIR}/dist"
 TOOLCHAIN_DIR="${TOOLCHAIN_DIR:-${ROOT_DIR}/toolchain}"
+SUKISU_DIR="${KERNEL_DIR}/SukiSU-Ultra"
 
-: "${KERNEL_REF:=lineage-23.2}"
-: "${SUKISU_REF:=v4.1.3}"
 : "${CLANG_VERSION:=clang-r563880c}"
+
+# shellcheck disable=SC1091
+source "${ROOT_DIR}/build.lock"
+
+for lock_var in KERNEL_COMMIT SUKISU_COMMIT TOOLCHAIN_COMMIT; do
+  lock_value="${!lock_var}"
+  [[ "${lock_value}" =~ ^[0-9a-f]{40}$ ]] || {
+    echo "Invalid ${lock_var}: ${lock_value}" >&2
+    exit 1
+  }
+done
 
 export PATH="${TOOLCHAIN_DIR}/bin:${PATH}"
 export ARCH=arm64
@@ -17,89 +27,96 @@ export LLVM=1
 export LLVM_IAS=1
 export KBUILD_BUILD_USER=github-actions
 export KBUILD_BUILD_HOST=github
+export SOURCE_DATE_EPOCH="${SOURCE_DATE_EPOCH:-0}"
+export KBUILD_BUILD_TIMESTAMP="${KBUILD_BUILD_TIMESTAMP:-Thu Jan 1 00:00:00 UTC 1970}"
+export KBUILD_BUILD_VERSION="${KBUILD_BUILD_VERSION:-1}"
+export LC_ALL=C
+export LANG=C
+export TZ=UTC
 
 mkdir -p "${OUT_DIR}" "${DIST_DIR}"
 
-echo "Integrating SukiSU-Ultra ${SUKISU_REF}"
-(
-  cd "${KERNEL_DIR}"
-  curl --fail --location --silent --show-error \
-    "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/${SUKISU_REF}/kernel/setup.sh" \
-    | sh -s "${SUKISU_REF}"
-)
+echo "Fetching locked SukiSU-Ultra ${SUKISU_COMMIT}"
+git init "${SUKISU_DIR}"
+git -C "${SUKISU_DIR}" remote add origin \
+  https://github.com/SukiSU-Ultra/SukiSU-Ultra.git
+git -C "${SUKISU_DIR}" fetch --depth=1 origin "${SUKISU_COMMIT}"
+git -C "${SUKISU_DIR}" checkout --detach FETCH_HEAD
+test "$(git -C "${SUKISU_DIR}" rev-parse HEAD)" = "${SUKISU_COMMIT}"
 
-echo "Backporting path_umount for Linux 4.19"
-if ! grep -q '^int path_umount(struct path \*path, int flags)' \
-  "${KERNEL_DIR}/fs/namespace.c"; then
-  git -C "${KERNEL_DIR}" apply "${ROOT_DIR}/patches/path-umount-4.19.patch"
-fi
+test ! -e "${KERNEL_DIR}/drivers/kernelsu"
+ln -s ../SukiSU-Ultra/kernel "${KERNEL_DIR}/drivers/kernelsu"
 
-echo "Applying the Linux 4.19 access_ok compatibility shim for SukiSU-Ultra KPM"
-if ! grep -q '^static inline bool sukisu_access_ok_compat' \
-  "${KERNEL_DIR}/KernelSU/kernel/kpm/kpm.c"; then
-  git -C "${KERNEL_DIR}/KernelSU" apply \
-    "${ROOT_DIR}/patches/sukisu-kpm-access-ok-4.19.patch"
-fi
+apply_patch_series() {
+  local repo="$1"
+  local series_dir="$2"
+  local patch_name patch_path
 
-echo "Backporting MODULE_IMPORT_NS compatibility for SukiSU-Ultra"
-if ! grep -q '^#define MODULE_IMPORT_NS(ns)' \
-  "${KERNEL_DIR}/KernelSU/kernel/core/init.c"; then
-  git -C "${KERNEL_DIR}/KernelSU" apply \
-    "${ROOT_DIR}/patches/sukisu-module-import-ns-4.19.patch"
-fi
+  test -f "${series_dir}/series"
+  while IFS= read -r patch_name || [[ -n "${patch_name}" ]]; do
+    [[ -z "${patch_name}" || "${patch_name}" == \#* ]] && continue
+    [[ "${patch_name}" != */* && "${patch_name}" != *\\* ]] || {
+      echo "Invalid patch name in ${series_dir}/series: ${patch_name}" >&2
+      exit 1
+    }
+    patch_path="${series_dir}/${patch_name}"
+    test -f "${patch_path}"
+    echo "Applying ${patch_path}"
+    git -C "${repo}" apply --check "${patch_path}"
+    git -C "${repo}" apply "${patch_path}"
+  done < "${series_dir}/series"
+}
 
-echo "Disabling unavailable VFS wrapper methods on Linux 4.19"
-if ! grep -q '^#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 0, 0)$' \
-  "${KERNEL_DIR}/KernelSU/kernel/infra/file_wrapper.c"; then
-  git -C "${KERNEL_DIR}/KernelSU" apply \
-    "${ROOT_DIR}/patches/sukisu-file-wrapper-4.19.patch"
-fi
+apply_patch_series "${KERNEL_DIR}" \
+  "${ROOT_DIR}/patches/kernel-lineage-23.2"
+apply_patch_series "${SUKISU_DIR}" \
+  "${ROOT_DIR}/patches/sukisu-v4.1.3-linux-4.19"
+git -C "${SUKISU_DIR}" add -N -- kernel/compat/task_work_compat.h
+git -C "${KERNEL_DIR}" diff --check
+git -C "${SUKISU_DIR}" diff --check
+bash "${ROOT_DIR}/scripts/audit-kernel-source.sh" \
+  "${ROOT_DIR}" \
+  "${KERNEL_DIR}" \
+  "${SUKISU_DIR}"
+git -C "${KERNEL_DIR}" diff --binary > "${DIST_DIR}/kernel-final.diff"
+git -C "${SUKISU_DIR}" diff --binary > "${DIST_DIR}/sukisu-final-complete.diff"
 
-echo "Backporting the native seccomp syscall count for Linux 4.19"
-if ! grep -q '^#define SECCOMP_ARCH_NATIVE_NR __NR_syscalls' \
-  "${KERNEL_DIR}/KernelSU/kernel/infra/seccomp_cache.c"; then
-  git -C "${KERNEL_DIR}/KernelSU" apply \
-    "${ROOT_DIR}/patches/sukisu-seccomp-nr-4.19.patch"
-fi
+write_applied_patches() {
+  local series_name="$1"
+  local series_dir="$2"
+  local patch_name
 
-echo "Using the Linux 4.19 mount header layout for SukiSU-Ultra"
-if grep -q '^#include <uapi/linux/mount.h>' \
-  "${KERNEL_DIR}/KernelSU/kernel/infra/su_mount_ns.c"; then
-  git -C "${KERNEL_DIR}/KernelSU" apply \
-    "${ROOT_DIR}/patches/sukisu-mount-header-4.19.patch"
-fi
+  printf '[%s]\n' "${series_name}"
+  while IFS= read -r patch_name || [[ -n "${patch_name}" ]]; do
+    [[ -z "${patch_name}" || "${patch_name}" == \#* ]] && continue
+    printf '%s/%s\n' "${series_name}" "${patch_name}"
+  done < "${series_dir}/series"
+}
 
-echo "Backporting the Linux 4.19 fsnotify observer callback"
-if ! grep -q '^static int ksu_handle_event(struct fsnotify_group' \
-  "${KERNEL_DIR}/KernelSU/kernel/manager/pkg_observer.c"; then
-  git -C "${KERNEL_DIR}/KernelSU" apply \
-    "${ROOT_DIR}/patches/sukisu-fsnotify-4.19.patch"
-fi
+{
+  write_applied_patches kernel-lineage-23.2 \
+    "${ROOT_DIR}/patches/kernel-lineage-23.2"
+  write_applied_patches sukisu-v4.1.3-linux-4.19 \
+    "${ROOT_DIR}/patches/sukisu-v4.1.3-linux-4.19"
+} > "${DIST_DIR}/applied-patches.txt"
 
-echo "Backporting the Linux 4.19 task_work API for SukiSU-Ultra"
-if ! grep -q '^#define KSU_TWA_RESUME true' \
-  "${KERNEL_DIR}/KernelSU/kernel/policy/allowlist.c"; then
-  git -C "${KERNEL_DIR}/KernelSU" apply \
-    "${ROOT_DIR}/patches/sukisu-task-work-4.19.patch"
-fi
+emit_patch_digests() {
+  local series_dir="$1"
+  local patch_name
 
-echo "Gating the newer seccomp filter counter on Linux 4.19"
-if ! grep -q '^#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 0, 0)$' \
-  "${KERNEL_DIR}/KernelSU/kernel/policy/app_profile.c"; then
-  git -C "${KERNEL_DIR}/KernelSU" apply \
-    "${ROOT_DIR}/patches/sukisu-seccomp-filter-count-4.19.patch"
-fi
+  sha256sum "${series_dir}/series" | cut -d ' ' -f1
+  while IFS= read -r patch_name || [[ -n "${patch_name}" ]]; do
+    [[ -z "${patch_name}" || "${patch_name}" == \#* ]] && continue
+    sha256sum "${series_dir}/${patch_name}" | cut -d ' ' -f1
+  done < "${series_dir}/series"
+}
 
-echo "Backporting the Linux 4.19 SELinux policy layout for SukiSU-Ultra"
-if ! grep -q '^static DEFINE_MUTEX(ksu_rules);' \
-  "${KERNEL_DIR}/KernelSU/kernel/selinux/rules.c"; then
-  git -C "${KERNEL_DIR}/KernelSU" apply \
-    "${ROOT_DIR}/patches/sukisu-selinux-policy-4.19.patch"
-fi
-
-echo "Using the Linux 4.19 SELinux policydb implementation"
-cp "${ROOT_DIR}/compat/sukisu/sepolicy-4.19.c" \
-  "${KERNEL_DIR}/KernelSU/kernel/selinux/sepolicy.c"
+patch_series_hash="$(
+  {
+    emit_patch_digests "${ROOT_DIR}/patches/kernel-lineage-23.2"
+    emit_patch_digests "${ROOT_DIR}/patches/sukisu-v4.1.3-linux-4.19"
+  } | sha256sum | cut -d ' ' -f1
+)"
 
 make_args=(
   -C "${KERNEL_DIR}"
@@ -136,19 +153,24 @@ make "${make_args[@]}" olddefconfig
 for required in \
   CONFIG_KSU=y \
   CONFIG_KSU_MANUAL_SU=y \
-  CONFIG_KPM=y \
   CONFIG_KPROBES=y \
   CONFIG_KRETPROBES=y \
   CONFIG_HAVE_SYSCALL_TRACEPOINTS=y \
   CONFIG_KALLSYMS=y \
   CONFIG_KALLSYMS_ALL=y \
   CONFIG_EXT4_FS=y \
-  CONFIG_OVERLAY_FS=y; do
+  CONFIG_OVERLAY_FS=y \
+  CONFIG_SECURITY_SELINUX=y; do
   grep -qx "${required}" "${OUT_DIR}/.config" || {
     echo "Required setting is missing after olddefconfig: ${required}" >&2
     exit 1
   }
 done
+
+grep -qx '# CONFIG_KPM is not set' "${OUT_DIR}/.config" || {
+  echo "Stable configuration unexpectedly enabled KPM" >&2
+  exit 1
+}
 
 echo "Building Image"
 make -j"$(nproc)" "${make_args[@]}" Image
@@ -159,23 +181,44 @@ cp "${image_path}" "${DIST_DIR}/Image"
 cp "${OUT_DIR}/.config" "${DIST_DIR}/kernel.config"
 
 kernel_sha="$(git -C "${KERNEL_DIR}" rev-parse HEAD)"
-sukisu_sha="$(git -C "${KERNEL_DIR}/KernelSU" rev-parse HEAD)"
+sukisu_sha="$(git -C "${SUKISU_DIR}" rev-parse HEAD)"
+project_sha="$(git -C "${ROOT_DIR}" rev-parse HEAD)"
 kernel_release="$(make -s "${make_args[@]}" kernelrelease)"
+config_hash="$(sha256sum "${OUT_DIR}/.config" | cut -d ' ' -f1)"
+
+bash "${ROOT_DIR}/scripts/generate-root-readiness.sh" \
+  "${DIST_DIR}/kernel.config" \
+  "${DIST_DIR}/applied-patches.txt" \
+  "${kernel_release}" \
+  "${DIST_DIR}/root-readiness.txt"
 
 cat > "${DIST_DIR}/build-info.txt" <<EOF
 device=kebab
 rom=lineage-23.2
+project_commit=${project_sha}
 kernel_repository=https://github.com/LineageOS/android_kernel_oneplus_sm8250
-kernel_ref=${KERNEL_REF}
+kernel_ref=${KERNEL_COMMIT}
 kernel_commit=${kernel_sha}
 kernel_release=${kernel_release}
 sukisu_repository=https://github.com/SukiSU-Ultra/SukiSU-Ultra
-sukisu_ref=${SUKISU_REF}
+sukisu_ref=${SUKISU_COMMIT}
 sukisu_commit=${sukisu_sha}
+toolchain_commit=${TOOLCHAIN_COMMIT}
+patch_series_hash=${patch_series_hash}
+config_hash=${config_hash}
 clang_version=${CLANG_VERSION}
 compiler=$(clang --version | head -n 1)
+source_date_epoch=${SOURCE_DATE_EPOCH}
+kbuild_build_timestamp=${KBUILD_BUILD_TIMESTAMP}
+kbuild_build_version=${KBUILD_BUILD_VERSION}
+locale=${LC_ALL}
+timezone=${TZ}
 EOF
 
-echo "KERNEL_SHA=${kernel_sha}" >> "${GITHUB_ENV}"
-echo "SUKISU_SHA=${sukisu_sha}" >> "${GITHUB_ENV}"
-echo "KERNEL_RELEASE=${kernel_release}" >> "${GITHUB_ENV}"
+{
+  echo "KERNEL_SHA=${kernel_sha}"
+  echo "SUKISU_SHA=${sukisu_sha}"
+  echo "KERNEL_RELEASE=${kernel_release}"
+  echo "PROJECT_SHA=${project_sha}"
+  echo "PROJECT_SHORT_SHA=${project_sha:0:7}"
+} >> "${GITHUB_ENV}"
