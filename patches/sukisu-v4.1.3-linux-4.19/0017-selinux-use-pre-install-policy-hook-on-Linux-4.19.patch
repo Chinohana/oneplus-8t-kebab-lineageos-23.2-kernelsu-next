@@ -17,8 +17,8 @@ that optional interface on Linux 4.19 until it has a real copy-on-write
 implementation.  Basic KSU domain creation and fixed boot permissions remain
 available.
 ---
- kernel/selinux/rules.c | 49 ++++++++++++++++++++++++++++++-------------------
- 1 file changed, 30 insertions(+), 19 deletions(-)
+ kernel/selinux/rules.c | 53 ++++++++++++++++++++++++++++++-----------------------
+ 1 file changed, 30 insertions(+), 23 deletions(-)
 
 diff --git a/kernel/selinux/rules.c b/kernel/selinux/rules.c
 index 34145d0..0000000 100644
@@ -102,6 +102,22 @@ index 34145d0..0000000 100644
 +            "second-stage active-policy mutation skipped\n");
      return;
  #endif
+ 
+@@ -283,15 +289,11 @@ void apply_kernelsu_rules()
+ #if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 10, 0)
+     rcu_assign_pointer(selinux_state.policy, pol);
+     synchronize_rcu();
+     ksu_destroy_sepolicy(old_pol);
+-#endif
+ 
+     reset_avc_cache();
+-#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 10, 0)
+ out_unlock:
+     mutex_unlock(&selinux_state.policy_mutex);
+-#else
+-    mutex_unlock(&ksu_rules);
+ #endif
+ }
  
 @@ -588,7 +594,11 @@ static int apply_one_sepolicy_cmd(struct policydb *db, const struct sepol_data *
  
