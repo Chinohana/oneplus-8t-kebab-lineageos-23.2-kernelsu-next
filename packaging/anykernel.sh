@@ -8,6 +8,7 @@ do.systemless=0
 do.cleanup=1
 do.cleanuponabort=0
 device.name1=kebab
+device.name2=OnePlus8T
 supported.versions=16
 supported.patchlevels=
 '; }
