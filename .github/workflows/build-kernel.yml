@@ -10,6 +10,7 @@ on:
       - build.lock
       - configs/**
       - patches/**
+      - scripts/audit-kernel-source.sh
       - scripts/build-kernel.sh
       - scripts/generate-root-readiness.sh
 
@@ -50,12 +51,20 @@ jobs:
             echo "${name}=${value}" >> "${GITHUB_ENV}"
           done
 
-      - name: Install build dependencies
+      - name: Install build and audit dependencies
         run: |
           sudo apt-get update
           sudo apt-get install --no-install-recommends -y \
             bc bison build-essential ca-certificates device-tree-compiler \
-            flex git libelf-dev libssl-dev lz4 python3 rsync zstd
+            flex git libelf-dev libssl-dev lz4 python3 rsync shellcheck zstd
+
+      - name: Audit project scripts
+        shell: bash
+        run: |
+          git diff --check
+          bash -n scripts/*.sh
+          sh -n packaging/anykernel.sh
+          shellcheck scripts/*.sh
 
       - name: Fetch locked LineageOS kernel source
         run: |
@@ -98,6 +107,7 @@ jobs:
           test -s dist/sukisu-final-complete.diff
           test -s dist/applied-patches.txt
           test -s dist/root-readiness.txt
+          test -s dist/static-audit.txt
           test -s dist/build.log
           cd dist
           sha256sum \
@@ -108,13 +118,14 @@ jobs:
             sukisu-final-complete.diff \
             applied-patches.txt \
             root-readiness.txt \
+            static-audit.txt \
             build.log > SHA256SUMS
 
       - name: Upload Image build audit
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: kebab-lineage-23.2-sukisu-ultra-image-${{ env.KERNEL_SHA }}
+          name: kebab-lineage-23.2-sukisu-ultra-image-${{ env.PROJECT_SHORT_SHA }}
           path: |
             dist/Image
             dist/kernel.config
@@ -124,6 +135,7 @@ jobs:
             dist/sukisu-final-complete.diff
             dist/applied-patches.txt
             dist/root-readiness.txt
+            dist/static-audit.txt
             dist/build.log
           if-no-files-found: warn
           compression-level: 6

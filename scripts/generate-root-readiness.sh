@@ -43,7 +43,7 @@ require_config 'CONFIG_KSU_MANUAL_SU=y'
 require_config '# CONFIG_KPM is not set'
 require_config 'CONFIG_SECURITY_SELINUX=y'
 require_patch 'sukisu-v4.1.3-linux-4.19/0014-feature-report-selinux_hide-unsupported-on-Linux-4.1.patch'
-require_patch 'sukisu-v4.1.3-linux-4.19/0015-security-disable-unsafe-SELinux-policy-mutation-on-L.patch'
+require_patch 'sukisu-v4.1.3-linux-4.19/0015-sukisu-restore-experimental-Linux-4.19-SELinux-rules.patch'
 
 if grep -Eq '^CONFIG_(KSU_)?SUSFS=y$' "${config_file}" ||
    grep -Eiq '(^|/)susfs([^/]*)(/|$)' "${patches_file}"; then
@@ -54,21 +54,30 @@ fi
 cat > "${output_file}" <<EOF
 image_compiled=yes
 flashable_package=no
+code_restored=yes
+compile_checks_passed=yes
 device_boot_test=no
 root_functional_test=no
-selinux_ksu_domain=absent
-selinux_boot_rules=unsupported
-dynamic_sepolicy=unsupported
+root_verified_on_device=no
+ready_for_owner_device_experimental_test=no
+selinux_ksu_domain=created_by_code_compile_checked_device_unverified
+selinux_ksu_file_context=created_by_code_compile_checked_device_unverified
+selinux_boot_rules=restored_compile_checked_device_unverified
+dynamic_sepolicy=restored_explicit_rules_only_compile_checked_device_unverified
 selinux_hide=unsupported
+selinux_enforcing=required
+ksu_domain_permissive=no
+wildcard_allow=no
+legacy_policy_mutation=in_place_non_transactional_no_rollback
 kpm=disabled
 susfs=absent
 release_ready=no
 kernel_release=${kernel_release}
 evidence_config=CONFIG_KSU=y,CONFIG_KSU_MANUAL_SU=y,CONFIG_SECURITY_SELINUX=y,CONFIG_KPM=n
-evidence_boot_rules=Linux_4.19_guard_returns_unsupported
-evidence_dynamic_sepolicy=handle_sepolicy_returns_-EOPNOTSUPP
-reason=u:r:ksu:s0 and u:object_r:ksu_file:s0 cannot be resolved by the current Android SELinux policy, so root in enforcing mode must not be claimed.
-notice=This static status file prevents misclassification and does not replace device testing.
+evidence_boot_rules=Linux_4.19_apply_kernelsu_rules_creates_ksu_and_ksu_file_with_explicit_rules
+evidence_dynamic_sepolicy=handle_sepolicy_processes_explicit_requests_and_rejects_wildcard_allow_and_permissive
+risk=Linux_4.19_mutates_the_active_policydb_in_place_without_transaction_or_rollback
+notice=Compilation_and_static_checks_passed_but_boot_Root_and_SELinux_behavior_remain_unverified_until_owner_device_testing.
 EOF
 
 test -s "${output_file}"

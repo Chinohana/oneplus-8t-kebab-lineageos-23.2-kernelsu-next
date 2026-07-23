@@ -1,0 +1,700 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Chinohana <chinohana@outlook.com>
+Date: Thu, 23 Jul 2026 19:00:00 +0800
+Subject: [PATCH] sukisu: restore experimental Linux 4.19 SELinux rules
+
+Restore the upstream-practiced legacy in-place policydb path for owner-only
+device testing. Keep enforcing, create dedicated ksu and ksu_file types, use
+explicit fixed permissions, reject wildcard allow and permissive dynamic
+requests, refuse Root credentials when the ksu context cannot be resolved,
+and add focused SukiSU-4.19 diagnostics.
+
+This remains a non-transactional, no-rollback legacy mutation path and is not
+release-ready.
+---
+diff --git a/kernel/core/init.c b/kernel/core/init.c
+index 6c29a55..0a5cefd 100644
+--- a/kernel/core/init.c
++++ b/kernel/core/init.c
+@@ -96,6 +96,7 @@ module_param(spoof_version, charp, 0);
+ 
+ int __init kernelsu_init(void)
+ {
++    pr_info("SukiSU-4.19: core initialization begin\n");
+ #if defined(__x86_64__)
+     // If the kernel has the hardening patch, X86_FEATURE_INDIRECT_SAFE must be set
+     if (!boot_cpu_has(X86_FEATURE_INDIRECT_SAFE)) {
+@@ -133,7 +134,8 @@ int __init kernelsu_init(void)
+ 
+     ksu_cred = prepare_creds();
+     if (!ksu_cred) {
+-        pr_err("prepare cred failed!\n");
++        pr_err("SukiSU-4.19: core initialization failed: prepare_creds returned NULL\n");
++        return -ENOMEM;
+     }
+ 
+     ksu_init_symbol_resolver();
+@@ -199,6 +201,11 @@ int __init kernelsu_init(void)
+ #ifndef CONFIG_KSU_DEBUG
+     kobject_del(&THIS_MODULE->mkobj.kobj);
+ #endif
++#endif
++#ifdef MODULE
++    pr_info("SukiSU-4.19: core initialization succeeded; built-in=0 late_loaded=%d\n", ksu_late_loaded);
++#else
++    pr_info("SukiSU-4.19: core initialization succeeded; built-in=1 late_loaded=0\n");
+ #endif
+     return 0;
+ }
+diff --git a/kernel/feature/sucompat.c b/kernel/feature/sucompat.c
+index ca4bb84..c4bd10b 100644
+--- a/kernel/feature/sucompat.c
++++ b/kernel/feature/sucompat.c
+@@ -152,14 +152,14 @@ long ksu_handle_execve_sucompat(const char __user **filename_user, int orig_nr,
+ 
+     ret = escape_with_root_profile();
+     if (ret) {
+-        pr_err("escape_with_root_profile failed: %ld\n", ret);
++        pr_err("SukiSU-4.19: authorized su request failed during credential setup: error=%ld\n", ret);
+         ksu_sulog_emit_pending(pending_sucompat, ret, GFP_KERNEL);
+         goto do_orig_execve;
+     }
+ 
+     ret = ksu_syscall_table[orig_nr](regs);
+     if (ret < 0) {
+-        pr_err("failed to execve ksud as su: %ld, fallback to sh\n", ret);
++        pr_err("SukiSU-4.19: ksud exec failed after authorized su request: error=%ld; falling back to sh\n", ret);
+         ksu_sulog_emit_pending(pending_sucompat, ret, GFP_KERNEL);
+         *filename_user = sh_user_path();
+     } else {
+diff --git a/kernel/policy/app_profile.c b/kernel/policy/app_profile.c
+index 95537ad..83fff56 100644
+--- a/kernel/policy/app_profile.c
++++ b/kernel/policy/app_profile.c
+@@ -120,6 +120,8 @@ static void disable_seccomp(void)
+ int escape_with_root_profile(void)
+ {
+     int ret = 0;
++    u64 effective_caps = 0;
++    u64 permitted_caps = 0;
+     struct cred *cred;
+     struct task_struct *p = current;
+     struct task_struct *t;
+@@ -190,10 +192,21 @@ int escape_with_root_profile(void)
+     memcpy(&cred->cap_bset, &profile->capabilities.effective, sizeof(cred->cap_bset));
+ 
+     setup_groups(profile, cred);
+-    setup_selinux(profile->selinux_domain, cred);
++    ret = setup_selinux(profile->selinux_domain, cred);
++    if (ret) {
++        pr_err("SukiSU-4.19: Root credential setup refused: SELinux transition error=%d\n", ret);
++        goto out_abort_creds;
++    }
+ 
+     commit_creds(cred);
+ 
++    BUILD_BUG_ON(sizeof(current_cred()->cap_effective) > sizeof(effective_caps));
++    memcpy(&effective_caps, &current_cred()->cap_effective, sizeof(current_cred()->cap_effective));
++    memcpy(&permitted_caps, &current_cred()->cap_permitted, sizeof(current_cred()->cap_permitted));
++    pr_info("SukiSU-4.19: Root credential setup succeeded: uid=%u gid=%u effective_caps=0x%016llx "
++            "permitted_caps=0x%016llx ksu_domain=%d\n",
++            current_uid().val, current_gid().val, effective_caps, permitted_caps, is_ksu_domain());
++
+     disable_seccomp();
+ 
+     for_each_thread (p, t) {
+@@ -219,6 +232,11 @@ void escape_to_root_for_init(void)
+         return;
+     }
+ 
+-    setup_selinux(KERNEL_SU_CONTEXT, cred);
++    if (setup_selinux(KERNEL_SU_CONTEXT, cred)) {
++        pr_err("SukiSU-4.19: init credential setup refused: SELinux transition failed\n");
++        abort_creds(cred);
++        return;
++    }
+     commit_creds(cred);
++    pr_info("SukiSU-4.19: init credential setup succeeded in ksu domain\n");
+ }
+diff --git a/kernel/runtime/ksud_integration.c b/kernel/runtime/ksud_integration.c
+index 8d247a7..b146b18 100644
+--- a/kernel/runtime/ksud_integration.c
++++ b/kernel/runtime/ksud_integration.c
+@@ -159,7 +159,7 @@ void ksu_handle_execveat_ksud(const char *path, struct user_arg_ptr *argv)
+     if (unlikely(!memcmp(path, system_bin_init, sizeof(system_bin_init) - 1) && argv)) {
+         char buf[16];
+         if (!init_second_stage_executed && check_argv(*argv, 1, "second_stage", buf, sizeof(buf))) {
+-            pr_info("/system/bin/init second_stage executed\n");
++            pr_info("SukiSU-4.19: /system/bin/init second_stage detected; applying SELinux rules\n");
+ #if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 10, 0)
+             ksu_selinux_hide_handle_second_stage();
+ #endif
+@@ -642,9 +642,17 @@ void __init ksu_ksud_init()
+ 
+     ksu_syscall_table_hook(__NR_read, ksu_sys_read, &orig_sys_read);
+     ksu_syscall_table_hook(__NR_fstat, ksu_sys_fstat, &orig_sys_fstat);
++    if (!orig_sys_read || !orig_sys_fstat)
++        pr_err("SukiSU-4.19: ksud init hook failed: read_hook=%d fstat_hook=%d\n", !!orig_sys_read,
++               !!orig_sys_fstat);
++    else
++        pr_info("SukiSU-4.19: ksud init hooks installed\n");
+ 
+     ret = register_kprobe(&input_event_kp);
+-    pr_info("ksud: input_event_kp: %d\n", ret);
++    if (ret)
++        pr_err("SukiSU-4.19: ksud input hook failed: error=%d\n", ret);
++    else
++        pr_info("SukiSU-4.19: ksud input hook installed\n");
+ 
+     INIT_WORK(&stop_input_hook_work, do_stop_input_hook);
+ }
+diff --git a/kernel/selinux/rules.c b/kernel/selinux/rules.c
+index 98fc276..34145d0 100644
+--- a/kernel/selinux/rules.c
++++ b/kernel/selinux/rules.c
+@@ -1,5 +1,6 @@
+ #include "linux/rcupdate.h"
+ #include "security.h"
++#include <linux/kernel.h>
+ #include <linux/uaccess.h>
+ #include <linux/types.h>
+ #include <linux/version.h>
+@@ -25,6 +26,173 @@ static DEFINE_MUTEX(ksu_rules);
+ 
+ #define ALL NULL
+ 
++struct ksu_legacy_rule {
++    const char *src;
++    const char *tgt;
++    const char *class;
++    const char *perm;
++};
++
++static bool ksu_apply_legacy_rule_table(struct policydb *db, const struct ksu_legacy_rule *rules, size_t count)
++{
++    bool success = true;
++    size_t i;
++
++    for (i = 0; i < count; i++) {
++        if (ksu_allow(db, rules[i].src, rules[i].tgt, rules[i].class, rules[i].perm))
++            continue;
++
++        pr_err("SukiSU-4.19: fixed rule failed: %s %s:%s %s\n", rules[i].src, rules[i].tgt,
++               rules[i].class, rules[i].perm);
++        success = false;
++    }
++
++    return success;
++}
++
++static bool ksu_apply_legacy_perms(struct policydb *db, const char *src, const char *tgt, const char *class,
++                                   const char *const *perms, size_t count)
++{
++    bool success = true;
++    size_t i;
++
++    for (i = 0; i < count; i++) {
++        if (ksu_allow(db, src, tgt, class, perms[i]))
++            continue;
++
++        pr_err("SukiSU-4.19: fixed rule failed: %s %s:%s %s\n", src, tgt, class, perms[i]);
++        success = false;
++    }
++
++    return success;
++}
++
++static bool ksu_apply_legacy_kernelsu_rules(struct policydb *db)
++{
++    static const char *const capability_perms[] = {
++        "chown",          "dac_override", "dac_read_search", "fowner",       "fsetid",      "kill",
++        "setgid",         "setuid",       "setpcap",         "linux_immutable", "net_bind_service",
++        "net_broadcast",  "net_admin",    "net_raw",         "ipc_lock",     "ipc_owner",   "sys_module",
++        "sys_rawio",      "sys_chroot",   "sys_ptrace",      "sys_pacct",    "sys_admin",   "sys_boot",
++        "sys_nice",       "sys_resource", "sys_time",        "sys_tty_config", "mknod",       "lease",
++        "audit_write",    "audit_control", "setfcap",
++    };
++    static const char *const capability2_perms[] = {
++        "mac_override", "mac_admin", "syslog", "wake_alarm", "block_suspend", "audit_read",
++    };
++    static const char *const file_perms[] = {
++        "open",       "read",        "write",       "append",      "getattr",    "execute",
++        "execute_no_trans", "entrypoint",  "map",         "create",      "unlink",     "rename",
++        "setattr",    "relabelfrom", "relabelto",
++    };
++    static const char *const dir_perms[] = {
++        "search",      "open",       "read",       "write",      "getattr",    "add_name", "remove_name",
++        "create",      "rmdir",      "rename",     "setattr",    "relabelfrom", "relabelto",
++    };
++    static const char *const lnk_file_perms[] = {
++        "read", "getattr", "create", "unlink", "rename", "setattr", "relabelfrom", "relabelto",
++    };
++    static const char *const chr_file_perms[] = {
++        "open", "read", "write", "append", "getattr", "ioctl",
++    };
++    static const char *const fifo_file_perms[] = {
++        "open", "read", "write", "append", "getattr",
++    };
++    static const char *const sock_file_perms[] = {
++        "open", "read", "write", "append", "getattr", "create", "unlink", "setattr",
++    };
++    static const char *const filesystem_perms[] = {
++        "getattr", "mount", "remount", "unmount", "associate", "quotamod", "quotaget",
++    };
++    static const struct ksu_legacy_rule rules[] = {
++        { "init", KERNEL_SU_DOMAIN, "process", "transition" },
++        { "init", KERNEL_SU_DOMAIN, "process", "sigchld" },
++        { "init", KERNEL_SU_DOMAIN, "process", "noatsecure" },
++        { "init", KERNEL_SU_DOMAIN, "process", "rlimitinh" },
++        { KERNEL_SU_DOMAIN, "domain", "process", "getattr" },
++        { KERNEL_SU_DOMAIN, "domain", "process", "getpgid" },
++        { KERNEL_SU_DOMAIN, "domain", "process", "signal" },
++        { KERNEL_SU_DOMAIN, "domain", "process", "sigchld" },
++        { KERNEL_SU_DOMAIN, "domain", "process", "sigkill" },
++        { KERNEL_SU_DOMAIN, "domain", "process", "ptrace" },
++        { KERNEL_SU_DOMAIN, "domain", "process", "getsched" },
++        { KERNEL_SU_DOMAIN, "domain", "process", "setsched" },
++        { KERNEL_SU_DOMAIN, "domain", "process", "setpgid" },
++        { "domain", KERNEL_SU_DOMAIN, "process", "getattr" },
++        { "domain", KERNEL_SU_DOMAIN, "process", "getpgid" },
++        { "domain", KERNEL_SU_DOMAIN, "process", "signal" },
++        { "domain", KERNEL_SU_DOMAIN, "process", "sigchld" },
++        { "domain", KERNEL_SU_DOMAIN, "process", "sigkill" },
++        { KERNEL_SU_DOMAIN, "domain", "fd", "use" },
++        { "domain", KERNEL_SU_DOMAIN, "fd", "use" },
++        { KERNEL_SU_DOMAIN, "domain", "binder", "call" },
++        { KERNEL_SU_DOMAIN, "domain", "binder", "transfer" },
++        { "domain", KERNEL_SU_DOMAIN, "binder", "call" },
++        { "domain", KERNEL_SU_DOMAIN, "binder", "transfer" },
++        { KERNEL_SU_DOMAIN, "domain", "fifo_file", "read" },
++        { KERNEL_SU_DOMAIN, "domain", "fifo_file", "write" },
++        { KERNEL_SU_DOMAIN, "domain", "fifo_file", "open" },
++        { KERNEL_SU_DOMAIN, "domain", "fifo_file", "getattr" },
++        { "domain", KERNEL_SU_DOMAIN, "fifo_file", "read" },
++        { "domain", KERNEL_SU_DOMAIN, "fifo_file", "write" },
++        { "domain", KERNEL_SU_DOMAIN, "fifo_file", "open" },
++        { "domain", KERNEL_SU_DOMAIN, "fifo_file", "getattr" },
++        { KERNEL_SU_DOMAIN, "domain", "unix_stream_socket", "read" },
++        { KERNEL_SU_DOMAIN, "domain", "unix_stream_socket", "write" },
++        { KERNEL_SU_DOMAIN, "domain", "unix_stream_socket", "connectto" },
++        { KERNEL_SU_DOMAIN, "domain", "unix_stream_socket", "getopt" },
++        { KERNEL_SU_DOMAIN, "domain", "unix_stream_socket", "getattr" },
++        { "domain", KERNEL_SU_DOMAIN, "unix_stream_socket", "read" },
++        { "domain", KERNEL_SU_DOMAIN, "unix_stream_socket", "write" },
++        { "domain", KERNEL_SU_DOMAIN, "unix_stream_socket", "connectto" },
++        { "domain", KERNEL_SU_DOMAIN, "unix_stream_socket", "getopt" },
++        { "domain", KERNEL_SU_DOMAIN, "unix_stream_socket", "getattr" },
++        { "servicemanager", KERNEL_SU_DOMAIN, "process", "getattr" },
++        { "hwservicemanager", KERNEL_SU_DOMAIN, "process", "getattr" },
++        { "logd", KERNEL_SU_DOMAIN, "process", "getattr" },
++        { "system_server", KERNEL_SU_DOMAIN, "process", "getpgid" },
++        { "system_server", KERNEL_SU_DOMAIN, "process", "sigkill" },
++    };
++    bool success = true;
++
++    success &= ksu_type(db, KERNEL_SU_DOMAIN, "domain");
++    success &= ksu_typeattribute(db, KERNEL_SU_DOMAIN, "mlstrustedsubject");
++    success &= ksu_typeattribute(db, KERNEL_SU_DOMAIN, "netdomain");
++    success &= ksu_typeattribute(db, KERNEL_SU_DOMAIN, "bluetoothdomain");
++    success &= ksu_type(db, KERNEL_SU_FILE, "file_type");
++    success &= ksu_typeattribute(db, KERNEL_SU_FILE, "mlstrustedobject");
++
++    success &= ksu_apply_legacy_perms(db, KERNEL_SU_DOMAIN, KERNEL_SU_DOMAIN, "capability", capability_perms,
++                                      ARRAY_SIZE(capability_perms));
++    success &= ksu_apply_legacy_perms(db, KERNEL_SU_DOMAIN, KERNEL_SU_DOMAIN, "capability2", capability2_perms,
++                                      ARRAY_SIZE(capability2_perms));
++    success &= ksu_apply_legacy_perms(db, KERNEL_SU_DOMAIN, "file_type", "file", file_perms,
++                                      ARRAY_SIZE(file_perms));
++    success &= ksu_apply_legacy_perms(db, KERNEL_SU_DOMAIN, "file_type", "dir", dir_perms,
++                                      ARRAY_SIZE(dir_perms));
++    success &= ksu_apply_legacy_perms(db, KERNEL_SU_DOMAIN, "file_type", "lnk_file", lnk_file_perms,
++                                      ARRAY_SIZE(lnk_file_perms));
++    success &= ksu_apply_legacy_perms(db, KERNEL_SU_DOMAIN, "dev_type", "chr_file", chr_file_perms,
++                                      ARRAY_SIZE(chr_file_perms));
++    success &= ksu_apply_legacy_perms(db, KERNEL_SU_DOMAIN, "dev_type", "blk_file", chr_file_perms,
++                                      ARRAY_SIZE(chr_file_perms));
++    success &= ksu_apply_legacy_perms(db, KERNEL_SU_DOMAIN, "file_type", "fifo_file", fifo_file_perms,
++                                      ARRAY_SIZE(fifo_file_perms));
++    success &= ksu_apply_legacy_perms(db, KERNEL_SU_DOMAIN, "file_type", "sock_file", sock_file_perms,
++                                      ARRAY_SIZE(sock_file_perms));
++    success &= ksu_apply_legacy_perms(db, KERNEL_SU_DOMAIN, "fs_type", "filesystem", filesystem_perms,
++                                      ARRAY_SIZE(filesystem_perms));
++    success &= ksu_apply_legacy_perms(db, "domain", KERNEL_SU_FILE, "file", file_perms,
++                                      ARRAY_SIZE(file_perms));
++    success &= ksu_apply_legacy_perms(db, "domain", KERNEL_SU_FILE, "chr_file", chr_file_perms,
++                                      ARRAY_SIZE(chr_file_perms));
++    success &= ksu_apply_legacy_perms(db, "domain", KERNEL_SU_FILE, "fifo_file", fifo_file_perms,
++                                      ARRAY_SIZE(fifo_file_perms));
++    success &= ksu_apply_legacy_rule_table(db, rules, ARRAY_SIZE(rules));
++
++    return success;
++}
++
+ #if (LINUX_VERSION_CODE >= KERNEL_VERSION(6, 4, 0))
+ extern int avc_ss_reset(u32 seqno);
+ #else
+@@ -52,6 +220,7 @@ void apply_kernelsu_rules()
+     struct selinux_policy *pol, *old_pol = selinux_state.policy;
+ #endif
+     struct policydb *db;
++    bool success;
+ 
+     if (!getenforce()) {
+         pr_info("SELinux permissive or disabled, apply rules!\n");
+@@ -89,76 +258,28 @@ void apply_kernelsu_rules()
+     }
+ 
+     db = &pol->policydb;
++    success = ksu_apply_legacy_kernelsu_rules(db);
++    if (!success)
++        pr_err("SukiSU-4.19: SELinux boot rule application completed with failed rules\n");
+ #else
+     mutex_lock(&ksu_rules);
++    pr_info("SukiSU-4.19: SELinux boot rule application begin; enforcing=%d\n", getenforce());
++    if (!selinux_state.ss) {
++        pr_err("SukiSU-4.19: SELinux boot rule application failed: selinux_state.ss is NULL\n");
++        mutex_unlock(&ksu_rules);
++        return;
++    }
+     db = &selinux_state.ss->policydb;
++    success = ksu_apply_legacy_kernelsu_rules(db);
++    reset_avc_cache();
++    if (success)
++        pr_info("SukiSU-4.19: SELinux boot rule application succeeded; ksu and ksu_file created\n");
++    else
++        pr_err("SukiSU-4.19: SELinux boot rule application completed with failed rules\n");
++    mutex_unlock(&ksu_rules);
++    return;
+ #endif
+ 
+-    ksu_type(db, KERNEL_SU_DOMAIN, "domain");
+-    ksu_permissive(db, KERNEL_SU_DOMAIN);
+-    ksu_typeattribute(db, KERNEL_SU_DOMAIN, "mlstrustedsubject");
+-    ksu_typeattribute(db, KERNEL_SU_DOMAIN, "netdomain");
+-    ksu_typeattribute(db, KERNEL_SU_DOMAIN, "bluetoothdomain");
+-
+-    // Create unconstrained file type
+-    ksu_type(db, KERNEL_SU_FILE, "file_type");
+-    ksu_typeattribute(db, KERNEL_SU_FILE, "mlstrustedobject");
+-    ksu_allow(db, "domain", KERNEL_SU_FILE, ALL, ALL);
+-
+-    // allow all!
+-    ksu_allow(db, KERNEL_SU_DOMAIN, ALL, ALL, ALL);
+-
+-    // allow us do any ioctl
+-    if (db->policyvers >= POLICYDB_VERSION_XPERMS_IOCTL) {
+-        ksu_allowxperm(db, KERNEL_SU_DOMAIN, ALL, "blk_file", ALL);
+-        ksu_allowxperm(db, KERNEL_SU_DOMAIN, ALL, "fifo_file", ALL);
+-        ksu_allowxperm(db, KERNEL_SU_DOMAIN, ALL, "chr_file", ALL);
+-        ksu_allowxperm(db, KERNEL_SU_DOMAIN, ALL, "file", ALL);
+-    }
+-
+-    // our ksud triggered by init
+-    ksu_allow(db, "init", KERNEL_SU_DOMAIN, ALL, ALL);
+-
+-    // copied from Magisk rules
+-    // suRights
+-    ksu_allow(db, "servicemanager", KERNEL_SU_DOMAIN, "dir", "search");
+-    ksu_allow(db, "servicemanager", KERNEL_SU_DOMAIN, "dir", "read");
+-    ksu_allow(db, "servicemanager", KERNEL_SU_DOMAIN, "file", "open");
+-    ksu_allow(db, "servicemanager", KERNEL_SU_DOMAIN, "file", "read");
+-    ksu_allow(db, "servicemanager", KERNEL_SU_DOMAIN, "process", "getattr");
+-    ksu_allow(db, "domain", KERNEL_SU_DOMAIN, "process", "sigchld");
+-
+-    // allowLog
+-    ksu_allow(db, "logd", KERNEL_SU_DOMAIN, "dir", "search");
+-    ksu_allow(db, "logd", KERNEL_SU_DOMAIN, "file", "read");
+-    ksu_allow(db, "logd", KERNEL_SU_DOMAIN, "file", "open");
+-    ksu_allow(db, "logd", KERNEL_SU_DOMAIN, "file", "getattr");
+-
+-    // dumpsys, send fd
+-    ksu_allow(db, "domain", KERNEL_SU_DOMAIN, "fd", "use");
+-    ksu_allow(db, "domain", KERNEL_SU_DOMAIN, "fifo_file", "write");
+-    ksu_allow(db, "domain", KERNEL_SU_DOMAIN, "fifo_file", "read");
+-    ksu_allow(db, "domain", KERNEL_SU_DOMAIN, "fifo_file", "open");
+-    ksu_allow(db, "domain", KERNEL_SU_DOMAIN, "fifo_file", "getattr");
+-    ksu_allow(db, "domain", KERNEL_SU_DOMAIN, "unix_stream_socket", "read");
+-    ksu_allow(db, "domain", KERNEL_SU_DOMAIN, "unix_stream_socket", "write");
+-    ksu_allow(db, "domain", KERNEL_SU_DOMAIN, "unix_stream_socket", "connectto");
+-    ksu_allow(db, "domain", KERNEL_SU_DOMAIN, "unix_stream_socket", "getopt");
+-    ksu_allow(db, "domain", KERNEL_SU_DOMAIN, "unix_stream_socket", "getattr");
+-
+-    // bootctl
+-    ksu_allow(db, "hwservicemanager", KERNEL_SU_DOMAIN, "dir", "search");
+-    ksu_allow(db, "hwservicemanager", KERNEL_SU_DOMAIN, "file", "read");
+-    ksu_allow(db, "hwservicemanager", KERNEL_SU_DOMAIN, "file", "open");
+-    ksu_allow(db, "hwservicemanager", KERNEL_SU_DOMAIN, "process", "getattr");
+-
+-    // Allow all binder transactions
+-    ksu_allow(db, "domain", KERNEL_SU_DOMAIN, "binder", ALL);
+-
+-    // Allow system server kill su process
+-    ksu_allow(db, "system_server", KERNEL_SU_DOMAIN, "process", "getpgid");
+-    ksu_allow(db, "system_server", KERNEL_SU_DOMAIN, "process", "sigkill");
+-
+ #if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 10, 0)
+     rcu_assign_pointer(selinux_state.policy, pol);
+     synchronize_rcu();
+@@ -245,6 +366,21 @@ static int sepol_require_not_all(const char *value, const char *name)
+     return -EINVAL;
+ }
+ 
++static int sepol_require_explicit_allow(const char **args, size_t count)
++{
++    size_t i;
++
++    for (i = 0; i < count; i++) {
++        if (args[i] != ALL)
++            continue;
++
++        pr_err("SukiSU-4.19: dynamic sepolicy rejected wildcard allow argument #%zu\n", i);
++        return -EINVAL;
++    }
++
++    return 0;
++}
++
+ static int sepol_expected_argc(u32 cmd)
+ {
+     switch (cmd) {
+@@ -278,6 +414,9 @@ static int apply_one_sepolicy_cmd(struct policydb *db, const struct sepol_data *
+     switch (header->cmd) {
+     case KSU_SEPOLICY_CMD_NORMAL_PERM:
+         if (header->subcmd == KSU_SEPOLICY_SUBCMD_NORMAL_PERM_ALLOW) {
++            ret = sepol_require_explicit_allow(args, 4);
++            if (ret < 0)
++                return ret;
+             success = ksu_allow(db, args[0], args[1], args[2], args[3]);
+         } else if (header->subcmd == KSU_SEPOLICY_SUBCMD_NORMAL_PERM_DENY) {
+             success = ksu_deny(db, args[0], args[1], args[2], args[3]);
+@@ -301,6 +440,9 @@ static int apply_one_sepolicy_cmd(struct policydb *db, const struct sepol_data *
+         }
+ 
+         if (header->subcmd == KSU_SEPOLICY_SUBCMD_XPERM_ALLOW) {
++            ret = sepol_require_explicit_allow(args, 5);
++            if (ret < 0)
++                return ret;
+             success = ksu_allowxperm(db, args[0], args[1], args[2], args[4]);
+         } else if (header->subcmd == KSU_SEPOLICY_SUBCMD_XPERM_AUDITALLOW) {
+             success = ksu_auditallowxperm(db, args[0], args[1], args[2], args[4]);
+@@ -318,7 +460,12 @@ static int apply_one_sepolicy_cmd(struct policydb *db, const struct sepol_data *
+         }
+ 
+         if (header->subcmd == KSU_SEPOLICY_SUBCMD_TYPE_STATE_PERMISSIVE) {
++#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 10, 0)
++            pr_err("SukiSU-4.19: dynamic sepolicy rejected permissive request for %s\n", args[0]);
++            return -EOPNOTSUPP;
++#else
+             success = ksu_permissive(db, args[0]);
++#endif
+         } else if (header->subcmd == KSU_SEPOLICY_SUBCMD_TYPE_STATE_ENFORCE) {
+             success = ksu_enforce(db, args[0]);
+         } else {
+@@ -447,28 +594,34 @@ int handle_sepolicy(void __user *user_data, u64 data_len)
+     struct policydb *db;
+     struct sepol_batch_cursor cursor;
+     u8 *payload;
+-    int ret;
+-    int success_cmd_count;
+-    u32 cmd_index;
++    int ret = 0;
++    int success_cmd_count = 0;
++    u32 cmd_index = 0;
+ 
+     if (!user_data || !data_len) {
++        pr_err("SukiSU-4.19: dynamic sepolicy failed: empty request\n");
+         return -EINVAL;
+     }
+ 
+     if (data_len > KSU_SEPOLICY_MAX_BATCH_SIZE) {
++        pr_err("SukiSU-4.19: dynamic sepolicy failed: request too large (%llu bytes)\n", data_len);
+         return -E2BIG;
+     }
+ 
+     payload = kvmalloc((size_t)data_len, GFP_KERNEL);
+     if (!payload) {
++        pr_err("SukiSU-4.19: dynamic sepolicy failed: allocation failed (%llu bytes)\n", data_len);
+         return -ENOMEM;
+     }
+ 
+     if (copy_from_user(payload, user_data, (size_t)data_len)) {
+         ret = -EFAULT;
++        pr_err("SukiSU-4.19: dynamic sepolicy failed: copy_from_user returned EFAULT\n");
+         goto out_free;
+     }
+ 
++    pr_info("SukiSU-4.19: dynamic sepolicy request begin; bytes=%llu\n", data_len);
++
+     if (!getenforce()) {
+         pr_info("SELinux permissive or disabled when handle policy!\n");
+     }
+@@ -492,9 +645,6 @@ int handle_sepolicy(void __user *user_data, u64 data_len)
+     cursor.cur = payload;
+     cursor.end = payload + (size_t)data_len;
+ 
+-    ret = 0;
+-    success_cmd_count = 0;
+-    cmd_index = 0;
+     while (cursor.cur < cursor.end) {
+         struct sepol_data header;
+         const char *args[KSU_SEPOLICY_MAX_ARGS] = { 0 };
+@@ -525,6 +675,9 @@ int handle_sepolicy(void __user *user_data, u64 data_len)
+         ret = apply_one_sepolicy_cmd(db, &header, args);
+         if (ret < 0) {
+             pr_err("sepol: cmd #%u failed, cmd=%u subcmd=%u.\n", cmd_index, header.cmd, header.subcmd);
++#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 10, 0)
++            goto out_drop_new_policy;
++#endif
+         } else {
+             success_cmd_count++;
+         }
+@@ -557,5 +710,12 @@ out_unlock:
+ out_free:
+     kvfree(payload);
+ 
++    if (ret < 0)
++        pr_err("SukiSU-4.19: dynamic sepolicy request failed: result=%d commands=%u applied=%d\n", ret, cmd_index,
++               success_cmd_count);
++    else
++        pr_info("SukiSU-4.19: dynamic sepolicy request succeeded: commands=%u applied=%d\n", cmd_index,
++                success_cmd_count);
++
+     return ret;
+ }
+diff --git a/kernel/selinux/selinux.c b/kernel/selinux/selinux.c
+index 90a0de0..0218b28 100644
+--- a/kernel/selinux/selinux.c
++++ b/kernel/selinux/selinux.c
+@@ -1,5 +1,6 @@
+ #include "selinux.h"
+ #include "linux/cred.h"
++#include "linux/errno.h"
+ #include "linux/sched.h"
+ #include "objsec.h"
+ #include "linux/version.h"
+@@ -34,12 +35,16 @@ static int transive_to_domain(const char *domain, struct cred *cred, bool clear_
+ #endif
+     tsec = selinux_cred(cred);
+     if (!tsec) {
+-        pr_err("tsec == NULL!\n");
+-        return -1;
++        pr_err("SukiSU-4.19: context transition failed for %s: credential security is NULL\n", domain);
++        return -EINVAL;
+     }
+     error = security_secctx_to_secid(domain, strlen(domain), &sid);
+     if (error) {
+-        pr_info("security_secctx_to_secid %s -> sid: %d, error: %d\n", domain, sid, error);
++        pr_err("SukiSU-4.19: context transition failed for %s: secctx lookup error=%d sid=%u\n", domain, error,
++               sid);
++    } else if (!sid) {
++        pr_err("SukiSU-4.19: context transition failed for %s: resolved SID is 0\n", domain);
++        error = -EINVAL;
+     }
+     if (!error) {
+         tsec->sid = sid;
+@@ -49,23 +54,35 @@ static int transive_to_domain(const char *domain, struct cred *cred, bool clear_
+         if (clear_exec_sid) {
+             tsec->exec_sid = 0;
+         }
++        pr_info("SukiSU-4.19: context transition prepared for %s sid=%u\n", domain, sid);
+     }
+     return error;
+ }
+ 
+-void setup_selinux(const char *domain, struct cred *cred)
++int setup_selinux(const char *domain, struct cred *cred)
+ {
+-    if (transive_to_domain(domain, cred, false)) {
+-        pr_err("transive domain failed.\n");
+-        return;
+-    }
++    int error = transive_to_domain(domain, cred, false);
++
++    if (error)
++        pr_err("SukiSU-4.19: requested SELinux domain transition failed: error=%d\n", error);
++
++    return error;
+ }
+ 
+ void setup_ksu_cred(void)
+ {
+-    if (ksu_cred && transive_to_domain(KERNEL_SU_CONTEXT, ksu_cred, false)) {
+-        pr_err("setup ksu cred failed.\n");
++    int error;
++
++    if (!ksu_cred) {
++        pr_err("SukiSU-4.19: setup_ksu_cred failed: prepared credential is NULL\n");
++        return;
+     }
++
++    error = transive_to_domain(KERNEL_SU_CONTEXT, ksu_cred, false);
++    if (error)
++        pr_err("SukiSU-4.19: setup_ksu_cred failed: error=%d\n", error);
++    else
++        pr_info("SukiSU-4.19: setup_ksu_cred succeeded\n");
+ }
+ 
+ void setenforce(bool enforce)
+@@ -119,35 +136,35 @@ void cache_sid(void)
+     int err;
+ 
+     err = security_secctx_to_secid(KERNEL_SU_CONTEXT, strlen(KERNEL_SU_CONTEXT), &cached_su_sid);
+-    if (err) {
+-        pr_warn("Failed to cache kernel su domain SID: %d\n", err);
++    if (err || !cached_su_sid) {
++        pr_warn("SukiSU-4.19: cache_sid ksu failed: error=%d sid=%u\n", err, cached_su_sid);
+         cached_su_sid = 0;
+     } else {
+-        pr_info("Cached su SID: %u\n", cached_su_sid);
++        pr_info("SukiSU-4.19: cache_sid ksu succeeded: sid=%u\n", cached_su_sid);
+     }
+ 
+     err = security_secctx_to_secid(ZYGOTE_CONTEXT, strlen(ZYGOTE_CONTEXT), &cached_zygote_sid);
+-    if (err) {
+-        pr_warn("Failed to cache zygote SID: %d\n", err);
++    if (err || !cached_zygote_sid) {
++        pr_warn("SukiSU-4.19: cache_sid zygote failed: error=%d sid=%u\n", err, cached_zygote_sid);
+         cached_zygote_sid = 0;
+     } else {
+-        pr_info("Cached zygote SID: %u\n", cached_zygote_sid);
++        pr_info("SukiSU-4.19: cache_sid zygote succeeded: sid=%u\n", cached_zygote_sid);
+     }
+ 
+     err = security_secctx_to_secid(INIT_CONTEXT, strlen(INIT_CONTEXT), &cached_init_sid);
+-    if (err) {
+-        pr_warn("Failed to cache init SID: %d\n", err);
++    if (err || !cached_init_sid) {
++        pr_warn("SukiSU-4.19: cache_sid init failed: error=%d sid=%u\n", err, cached_init_sid);
+         cached_init_sid = 0;
+     } else {
+-        pr_info("Cached init SID: %u\n", cached_init_sid);
++        pr_info("SukiSU-4.19: cache_sid init succeeded: sid=%u\n", cached_init_sid);
+     }
+ 
+     err = security_secctx_to_secid(KSU_FILE_CONTEXT, strlen(KSU_FILE_CONTEXT), &ksu_file_sid);
+-    if (err) {
+-        pr_warn("Failed to cache ksu_file SID: %d\n", err);
++    if (err || !ksu_file_sid) {
++        pr_warn("SukiSU-4.19: cache_sid ksu_file failed: error=%d sid=%u\n", err, ksu_file_sid);
+         ksu_file_sid = 0;
+     } else {
+-        pr_info("Cached ksu_file SID: %u\n", ksu_file_sid);
++        pr_info("SukiSU-4.19: cache_sid ksu_file succeeded: sid=%u\n", ksu_file_sid);
+     }
+ }
+ 
+diff --git a/kernel/selinux/selinux.h b/kernel/selinux/selinux.h
+index a17ed22..ec7196c 100644
+--- a/kernel/selinux/selinux.h
++++ b/kernel/selinux/selinux.h
+@@ -13,7 +13,7 @@
+ #define ZYGOTE_CONTEXT "u:r:zygote:s0"
+ #define INIT_CONTEXT "u:r:init:s0"
+ 
+-void setup_selinux(const char *, struct cred *);
++int setup_selinux(const char *, struct cred *);
+ 
+ void setenforce(bool);
+ 
+-- 
+2.53.0.windows.2

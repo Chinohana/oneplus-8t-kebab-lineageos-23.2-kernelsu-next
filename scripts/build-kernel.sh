@@ -74,6 +74,10 @@ apply_patch_series "${SUKISU_DIR}" \
 git -C "${SUKISU_DIR}" add -N -- kernel/compat/task_work_compat.h
 git -C "${KERNEL_DIR}" diff --check
 git -C "${SUKISU_DIR}" diff --check
+bash "${ROOT_DIR}/scripts/audit-kernel-source.sh" \
+  "${ROOT_DIR}" \
+  "${KERNEL_DIR}" \
+  "${SUKISU_DIR}"
 git -C "${KERNEL_DIR}" diff --binary > "${DIST_DIR}/kernel-final.diff"
 git -C "${SUKISU_DIR}" diff --binary > "${DIST_DIR}/sukisu-final-complete.diff"
 
@@ -214,3 +218,5 @@ EOF
 echo "KERNEL_SHA=${kernel_sha}" >> "${GITHUB_ENV}"
 echo "SUKISU_SHA=${sukisu_sha}" >> "${GITHUB_ENV}"
 echo "KERNEL_RELEASE=${kernel_release}" >> "${GITHUB_ENV}"
+echo "PROJECT_SHA=${project_sha}" >> "${GITHUB_ENV}"
+echo "PROJECT_SHORT_SHA=${project_sha:0:7}" >> "${GITHUB_ENV}"
